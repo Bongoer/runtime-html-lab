@@ -3,7 +3,7 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#000000">
 <title>Web Runtime</title>
-<script src="./coi-serviceworker.js"></script>
+<script src="./coi-serviceworker.js?v=11"></script>
 </head><body>
 <style>
   #runtime-game, #runtime-game * { box-sizing:border-box; }
@@ -48,7 +48,7 @@
 (() => {
 'use strict';
 // Generic browser-hosted Godot 3 threaded runtime launcher. No bundled game assets.
-// Download targets are supplied by the visitor and not stored in this repository.
+// Engine assets are downloaded from their existing public URLs, not bundled into this repository.
 const ROOT=document.getElementById('runtime-game');
 if(ROOT.dataset.running) return;
 ROOT.dataset.running='true';
@@ -234,7 +234,7 @@ async function boot(){
   try {
     if(window.runtimeIsolationReady) await window.runtimeIsolationReady;
     if(!window.crossOriginIsolated||typeof SharedArrayBuffer==='undefined'){
-      throw Error('Shared memory is blocked in this browser context. Open this GitHub Pages link directly in a tab rather than inside W3Schools or an unisolated Framer iframe.');
+      throw Error('Shared WebAssembly memory is unavailable. This browser or an ancestor iframe does not support the required isolation. Try the hosted page directly in Chrome.');
     }
     if(typeof WebAssembly==='undefined')throw Error('WebAssembly is unavailable');
     if(typeof Worker==='undefined')throw Error('Web Workers are unavailable');

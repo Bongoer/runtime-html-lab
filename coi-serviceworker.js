@@ -1,6 +1,6 @@
-/* Runtime Lab browser isolation shim. HTTPS GitHub Pages/localhost only.
-   A service worker can add COOP/COEP to navigations on static origins.
-   Game and engine payloads are never cached or modified by this worker. */
+/* Generic web runtime isolation, revision 11.
+   Adds Document-Isolation-Policy for compatible Chrome/Edge embedded documents.
+   Retains COOP+COEP for standalone browser support. */
 if (typeof Window === 'undefined' && typeof document === 'undefined') {
   self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));
   self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
@@ -8,9 +8,11 @@ if (typeof Window === 'undefined' && typeof document === 'undefined') {
     if (event.request.mode !== 'navigate') return;
     event.respondWith((async () => {
       const response = await fetch(event.request);
-      // For failures, do not fabricate a success response.
       if (response.type === 'opaque' || response.type === 'opaqueredirect') return response;
       const headers = new Headers(response.headers);
+      // Unlike COOP/COEP, DIP can isolate an iframe without an isolated parent.
+      // Supported in Chromium 137+ desktop and 146+ Android.
+      headers.set('Document-Isolation-Policy', 'isolate-and-credentialless');
       headers.set('Cross-Origin-Opener-Policy', 'same-origin');
       headers.set('Cross-Origin-Embedder-Policy', 'credentialless');
       return new Response(response.body, {
@@ -21,47 +23,69 @@ if (typeof Window === 'undefined' && typeof document === 'undefined') {
     })());
   });
 } else {
-  window.runtimeIsolationReady = new Promise((resolve, reject) => {
-    if (self.crossOriginIsolated && typeof SharedArrayBuffer === 'function') {
-      sessionStorage.removeItem('runtime-coi-reloads');
-      resolve(); return;
-    }
+  window.runtimeIsolationReady = (async () => {
+    const supportsThreads = () =>
+      window.crossOriginIsolated && typeof SharedArrayBuffer === 'function';
+    if (supportsThreads()) return;
     if (!navigator.serviceWorker || !['https:', 'http:'].includes(location.protocol)) {
-      reject(new Error('Runtime Lab needs its published GitHub Pages URL (HTTPS), not content://, file:// or W3Schools Tryit.'));
-      return;
+      throw Error('The web runtime needs a secure hosted page (HTTPS), not a local content:// or file:// URL.');
     }
-    const key = 'runtime-coi-reloads';
-    const reloadCount = Number(sessionStorage.getItem(key) || '0');
-    // Chrome cannot isolate a document inside a non-isolated parent iframe.
-    if (window.top !== window && reloadCount > 0) {
-      reject(new Error('The embedded page is still not isolated. Open the GitHub Pages site in its own tab. A non-isolated W3Schools/Framer iframe cannot grant WebAssembly threading.'));
-      return;
+    const key = 'runtime-isolation-v11-reloads';
+    const attempts = Number(sessionStorage.getItem(key) || '0');
+    if (attempts >= 2) {
+      const permitted = document.permissionsPolicy?.allowsFeature?.('cross-origin-isolated');
+      const hint = permitted === false ?
+        ' An ancestor iframe has not delegated cross-origin-isolated permission.' :
+        ' The browser may not support per-frame Document Isolation Policy (Chrome 146+ on Android), or a parent editor may restrict iframe permissions.';
+      throw Error('WebAssembly threads are blocked in this embed.' + hint +
+        ' The runtime page can still be opened directly in a new tab.');
     }
-    if (reloadCount > 1) {
-      reject(new Error('GitHub Pages service worker is active but WebAssembly threading is still blocked. Check HTTPS, browser settings and sandbox/iframe restrictions.'));
-      return;
-    }
-    let done = false;
-    function reloadOnce() {
-      if (done) return;
-      done = true;
-      sessionStorage.setItem(key, String(reloadCount + 1));
+
+    let controllerChanged = false;
+    const onControllerChange = () => { controllerChanged = true; };
+    navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+    try {
+      const reg = await navigator.serviceWorker.register('./coi-serviceworker.js', {
+        scope: './', updateViaCache: 'none'
+      });
+      // Force a check even when the old service worker already controls the page.
+      await reg.update();
+      await navigator.serviceWorker.ready;
+      const installing = reg.installing;
+      if (installing && installing.state !== 'activated') {
+        await Promise.race([
+          new Promise(resolve => {
+            const check = () => {
+              if (['activated', 'redundant'].includes(installing.state)) {
+                installing.removeEventListener('statechange', check);
+                resolve();
+              }
+            };
+            installing.addEventListener('statechange', check);
+            check();
+          }),
+          new Promise(resolve => setTimeout(resolve, 10000))
+        ]);
+      }
+      if (!navigator.serviceWorker.controller) {
+        await Promise.race([
+          new Promise(resolve => {
+            if (controllerChanged) return resolve();
+            navigator.serviceWorker.addEventListener('controllerchange', resolve, {once: true});
+          }),
+          new Promise(resolve => setTimeout(resolve, 12000))
+        ]);
+      }
+      if (!navigator.serviceWorker.controller) {
+        throw Error('The isolation service worker did not gain control of the page.');
+      }
+      if (supportsThreads()) return;
+      sessionStorage.setItem(key, String(attempts + 1));
+      // Reopen this document under the newly installed service worker headers.
       location.reload();
+      await new Promise(() => {});
+    } finally {
+      navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
     }
-    const timer = setTimeout(() => {
-      if (!done) reject(new Error('Service worker registration timed out. Open the published HTTPS GitHub Pages page directly.'));
-    }, 15000);
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
-      clearTimeout(timer); reloadOnce();
-    }, {once:true});
-    navigator.serviceWorker.register('./coi-serviceworker.js', {scope: './'})
-      .then(() => navigator.serviceWorker.ready)
-      .then(() => {
-        if (navigator.serviceWorker.controller) {
-          clearTimeout(timer);
-          reloadOnce();
-        }
-      })
-      .catch(err => { clearTimeout(timer); reject(new Error('Unable to register isolation service worker: ' + err.message)); });
-  });
+  })();
 }
