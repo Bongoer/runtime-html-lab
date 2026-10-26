@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Web Runtime Lab</title>
+<script src="./coi-serviceworker.js"></script>
+</head><body>
+<style>
+  #runtime-game, #runtime-game * { box-sizing:border-box; }
+  #runtime-game { position:relative;width:100%;height:clamp(360px,80vh,800px);min-height:320px;
+    background:#000;color:#eee;overflow:hidden; font:14px Arial,Helvetica,sans-serif;touch-action:none; }
+  #runtime-game.runtime-standalone {height:100dvh;min-height:100svh;}
+  #runtime-canvas { display:block;width:100%;height:100%;outline:none; }
+  #runtime-loader { position:absolute;inset:0;background:#000;display:flex;align-items:center;
+     justify-content:center;padding:20px;text-align:center;z-index:5; }
+  #runtime-loader[hidden], #runtime-error[hidden] {display:none}
+  #runtime-inner {width:min(470px,100%)}
+  #runtime-title {font-size:26px;font-weight:600;margin:0 0 24px}
+  #runtime-phase {font-size:15px;color:#b6b6b6;margin:0 0 14px;line-height:1.5;}
+  #runtime-bytes {font-size:12px;letter-spacing:.1px;font-family:ui-monospace,Consolas,monospace;
+    font-variant-numeric:tabular-nums;word-break:break-word;margin:0 0 14px;}
+  #runtime-track {width:100%;height:6px;border-radius:4px;background:#333;overflow:hidden;}
+  #runtime-fill {height:100%;width:0;background:#db90b1;transition:width .1s linear;}
+  #runtime-percent {font-size:12px;margin:10px 0;color:#9d9d9d;}
+  #runtime-error {margin-top:20px;color:#f7a7a7;font-size:13px;line-height:1.5;
+    white-space:pre-wrap;overflow-wrap:anywhere;max-height:38vh;overflow:auto;}
+  #runtime-source {font-size:11px;color:#888;margin-top:6px;overflow-wrap:anywhere}
+  #runtime-retry {display:none;margin:20px auto 0;padding:10px 24px;border:0;background:#df9dbb;
+    border-radius:4px;color:#141414;font:inherit;cursor:pointer;}
+  #runtime-config {text-align:left;max-height:48vh;overflow:auto;scrollbar-width:thin;margin:16px auto 0;max-width:460px}
+  #runtime-config[hidden] {display:none}
+  #runtime-config label {display:block;font-size:12px;color:#bbb;margin:10px 0}
+  #runtime-config input {display:block;width:100%;margin-top:5px;padding:10px 12px;background:#171717;color:white;border:1px solid #454545;border-radius:5px;font:inherit;font-size:13px}
+  #runtime-config button {display:block;width:100%;margin:15px 0 8px;padding:11px;color:#111;background:#df9dbb;border:0;border-radius:5px;font:inherit}
+  @media (max-width:600px) {#runtime-title {font-size:23px} #runtime-game{min-height:260px}}
+</style>
+<div id="runtime-game">
+  <canvas id="runtime-canvas" tabindex="0" aria-label="Web application"></canvas>
+  <div id="runtime-loader" role="status" aria-live="polite">
+    <div id="runtime-inner">
+      <div id="runtime-title">Web Runtime Lab</div>
+      <div id="runtime-phase">Configure a compatible project to begin.</div>
+      <div id="runtime-bytes">0 / 0 bytes</div>
+      <div id="runtime-track"><div id="runtime-fill"></div></div>
+      <div id="runtime-percent">0.0%</div>
+      <div id="runtime-source"></div>
+      <div id="runtime-error" hidden></div>
+      <button id="runtime-retry" type="button">Retry</button>
+      <form id="runtime-config" hidden>
+        <label>Engine JavaScript URL<input name="js" type="url" required placeholder="https://example.org/export/index.js"></label>
+        <label>WebAssembly URL<input name="wasm" type="url" required placeholder="https://example.org/export/index.wasm"></label>
+        <label>WebAssembly file size (bytes)<input name="wasmSize" type="number" min="1" step="1" required></label>
+        <label>Project PCK URL<input name="pck" type="url" required placeholder="https://example.org/export/index.pck"></label>
+        <label>Project PCK size (bytes)<input name="pckSize" type="number" min="1" step="1" required></label>
+        <label>Display title<input name="label" placeholder="Web Runtime Lab" maxlength="80"></label>
+        <button type="submit">Launch configured project</button>
+      </form>
+    </div>
+  </div>
+</div>
+<script>
+(() => {
+'use strict';
+// Generic browser-hosted Godot 3 threaded runtime launcher. No bundled game assets.
+// Download targets are supplied by the visitor and not stored in this repository.
+const ROOT=document.getElementById('runtime-game');
+if(ROOT.dataset.running) return;
+ROOT.dataset.running='true';
+// Full viewport for a standalone .html file; contained layout inside an
+// existing webpage so that the host site's CSS stays unchanged.
+const visible=[...document.body.children].filter(el=>!['STYLE','SCRIPT','LINK','META'].includes(el.tagName));
+if(visible.length===1&&visible[0]===ROOT){
+  ROOT.classList.add('runtime-standalone');
+  document.body.style.margin='0';
+  document.body.style.background='#000';
+  document.documentElement.style.background='#000';
+  if(!document.querySelector('meta[name="viewport"]')){
+    const viewport=document.createElement('meta');
+    viewport.name='viewport';
+    viewport.content='width=device-width, initial-scale=1, viewport-fit=cover';
+    document.head.appendChild(viewport);
+  }
+}
+const $ = (name)=>document.getElementById('runtime-'+name);
+const QUERY=new URLSearchParams(location.search);
+const CONFIG={
+  js:QUERY.get('js')||'',
+  wasm:QUERY.get('wasm')||'',
+  pck:QUERY.get('pck')||'',
+  wasmSize:Number(QUERY.get('wasmSize')||0),
+  pckSize:Number(QUERY.get('pckSize')||0),
+  label:QUERY.get('label')||'Web Runtime Lab'
+};
+const SIZES=Object.freeze({'index.pck':CONFIG.pckSize,'index.wasm':CONFIG.wasmSize});
+const TOTAL=SIZES['index.pck']+SIZES['index.wasm'];
+const GLUE_URL=CONFIG.js;
+const DOWNLOAD_URLS={'index.pck':CONFIG.pck,'index.wasm':CONFIG.wasm};
+function projectConfigured(){
+  const paths=[CONFIG.js,CONFIG.pck,CONFIG.wasm];
+  return paths.every(src=>{try{return new URL(src).protocol==='https:'}catch{return false}})
+    && [CONFIG.pckSize,CONFIG.wasmSize].every(n=>Number.isSafeInteger(n)&&n>0);
+}
+$('title').textContent=CONFIG.label.slice(0,80);
+$('bytes').textContent='0 / '+Math.round(TOTAL||0).toLocaleString('en-US')+' bytes';
+const RELAYS=['https://gh-proxy.com/','https://ghproxy.net/','https://gh-proxy.net/'];
+// Embedded worker bootstrap and audio worklet taken from the V3 loader.
+const WORKER_CODE="/**\n * Emscripten pthread Web Worker bootstrap, adapted for the Godot 3 runtime\n * used by a compatible Godot 3 export.\n * Copyright 2015 The Emscripten Authors. SPDX-License-Identifier: MIT.\n * Compatible source files are supplied at runtime by the visitor.\n */\n'use strict';\nvar Module = {};\nvar err = function () { console.error.apply(console, arguments); };\nself.alert = function () { postMessage({cmd:'alert', text:Array.from(arguments).join(' '), threadId:Module['_pthread_self'] ? Module['_pthread_self']() : 0}); };\nModule['instantiateWasm'] = function (imports, receiveInstance) {\n  var instance = new WebAssembly.Instance(Module['wasmModule'], imports);\n  receiveInstance(instance);\n  Module['wasmModule'] = null;\n  return instance.exports;\n};\nself.onmessage = function (e) {\n  try {\n    var data = e.data;\n    if (data.cmd === 'load') {\n      Module['wasmModule'] = data.wasmModule;\n      Module['wasmMemory'] = data.wasmMemory;\n      Module['buffer'] = Module['wasmMemory'].buffer;\n      Module['ENVIRONMENT_IS_PTHREAD'] = true;\n      // The imported Godot glue posts {cmd:'loaded'} from its own pthread run().\n      if (typeof data.urlOrBlob === 'string') {\n        importScripts(data.urlOrBlob);\n      } else {\n        var objectURL = URL.createObjectURL(data.urlOrBlob);\n        try { importScripts(objectURL); } finally { URL.revokeObjectURL(objectURL); }\n      }\n      // Emscripten MODULARIZE is enabled: importing the file only defines the\n      // factory. It must be called with this worker's Module to initialize.\n      if (typeof Godot !== 'function') throw Error('Godot factory missing in worker');\n      Godot(Module).then(function(instance) { Module = instance; },function(e) { err('Godot worker init failed',e); throw e; });\n    } else if (data.cmd === 'run') {\n      Module['__performance_now_clock_drift'] = performance.now() - data.time;\n      Module['__emscripten_thread_init'](data.threadInfoStruct, 0, 0, 1);\n      Module['establishStackSpace']();\n      Module['PThread'].receiveObjectTransfer(data);\n      Module['PThread'].threadInitTLS();\n      try {\n        var result = Module['invokeEntryPoint'](data.start_routine, data.arg);\n        if (Module['keepRuntimeAlive']()) Module['PThread'].setExitStatus(result);\n        else Module['__emscripten_thread_exit'](result);\n      } catch (ex) {\n        if (ex !== 'unwind') {\n          if (ex instanceof Module['ExitStatus']) {\n            if (!Module['keepRuntimeAlive']()) Module['__emscripten_thread_exit'](ex.status);\n          } else throw ex;\n        }\n      }\n    } else if (data.cmd === 'cancel') {\n      if (Module['_pthread_self']()) Module['__emscripten_thread_exit'](-1);\n      postMessage({cmd:'cancelDone'});\n    } else if (data.target === 'setimmediate') {\n      // nothing\n    } else if (data.cmd === 'processThreadQueue') {\n      if (Module['_pthread_self']()) Module['_emscripten_current_thread_process_queued_calls']();\n    } else {\n      err('[Runtime Lab pthread] Unknown message:', data);\n    }\n  } catch (ex) {\n    err('[Runtime Lab pthread] Worker failed:', ex, ex && ex.stack);\n    throw ex;\n  }\n};\n";
+const AUDIO_CODE="/* Godot audio worklet, MIT License. Derived from Godot Engine worklet interface. */\nclass RingBuffer {\n  constructor(buffer, available, threaded) {\n    this.buffer=buffer; this.available=available; this.threaded=threaded;\n    this.readPosition=0; this.writePosition=0;\n  }\n  count() { return this.threaded ? Atomics.load(this.available,0) : this.available; }\n  free() { return this.buffer.length - this.count(); }\n  read(out) {\n    const first=Math.min(out.length,this.buffer.length-this.readPosition);\n    out.set(this.buffer.subarray(this.readPosition,this.readPosition+first));\n    if(out.length>first) out.set(this.buffer.subarray(0,out.length-first),first);\n    this.readPosition=(this.readPosition+out.length)%this.buffer.length;\n    if(this.threaded){ Atomics.sub(this.available,0,out.length); Atomics.notify(this.available,0); }\n    else this.available-=out.length;\n  }\n  write(samples) {\n    const first=Math.min(samples.length,this.buffer.length-this.writePosition);\n    this.buffer.set(samples.subarray(0,first),this.writePosition);\n    if(samples.length>first) this.buffer.set(samples.subarray(first));\n    this.writePosition=(this.writePosition+samples.length)%this.buffer.length;\n    if(this.threaded){ Atomics.add(this.available,0,samples.length); Atomics.notify(this.available,0); }\n    else this.available+=samples.length;\n  }\n}\nclass GodotProcessor extends AudioWorkletProcessor {\n  constructor() {\n    super(); this.running=true; this.threaded=false; this.output=null; this.input=null;\n    this.notifier=null; this.outputScratch=new Float32Array(0); this.inputScratch=new Float32Array(0);\n    this.port.onmessage=ev=>this.message(ev.data.cmd,ev.data.data);\n  }\n  message(cmd,data) {\n    if(cmd==='start' && data) {\n      const state=data[0]; this.threaded=true;\n      this.notifier=state.subarray(1,2);\n      this.input=new RingBuffer(data[1],state.subarray(2,3),true);\n      this.output=new RingBuffer(data[2],state.subarray(3,4),true);\n    } else if(cmd==='stop') {\n      this.running=false; this.input=null; this.output=null; this.notifier=null;\n    } else if(cmd==='start_nothreads') {\n      this.threaded=false; this.output=new RingBuffer(data[0],data[0].length,false);\n    } else if(cmd==='chunk' && this.output) {\n      this.output.write(data);\n    }\n  }\n  process(inputs,outputs) {\n    if(!this.running) return false;\n    if(!this.output) return true;\n    const input=inputs[0];\n    if(input && input.length && input[0].length) {\n      const frames=input[0].length, length=frames*input.length;\n      if(this.inputScratch.length!==length) this.inputScratch=new Float32Array(length);\n      for(let ch=0;ch<input.length;ch++) for(let i=0;i<frames;i++) this.inputScratch[i*input.length+ch]=input[ch][i];\n      if(!this.threaded) this.port.postMessage({cmd:'input',data:this.inputScratch});\n      else if(this.input.free()>=length) this.input.write(this.inputScratch);\n    }\n    const output=outputs[0];\n    if(output && output.length && output[0].length) {\n      const frames=output[0].length, length=frames*output.length;\n      if(this.outputScratch.length!==length) this.outputScratch=new Float32Array(length);\n      if(this.output.count()>=length) {\n        this.output.read(this.outputScratch);\n        for(let ch=0;ch<output.length;ch++) for(let i=0;i<frames;i++) output[ch][i]=this.outputScratch[i*output.length+ch];\n        if(!this.threaded) this.port.postMessage({cmd:'read',data:length});\n      } else {\n        for(const channel of output) channel.fill(0);\n      }\n    }\n    if(this.notifier){Atomics.add(this.notifier,0,1);Atomics.notify(this.notifier,0);}\n    return true;\n  }\n}\nregisterProcessor('godot-processor',GodotProcessor);\n";
+const BASE_FETCH=window.fetch.bind(window);
+const format=n=>Math.floor(Math.max(0,n)).toLocaleString('en-US');
+let launching=false,launched=false,glueBlobUrl=null,workerBlobUrl=null,audioBlobUrl=null;
+let originalFetch=window.fetch;
+let failTimer=null, retryTimer=null, lastGodotError='';
+const urlName=url=>{try{return new URL(url).hostname}catch{return 'Unknown source'}};
+function phase(text){$('phase').textContent=text;console.log('[Runtime Lab]',text)}
+function showProgress(current,total){
+  if(!Number.isFinite(current)||current<0)return;
+  const max=Number.isFinite(total)&&total>0?total:TOTAL,done=Math.min(current,max);
+  const percent=max?Math.min(100,done/max*100):0;
+  $('bytes').textContent=`${format(done)} / ${format(max)} bytes`;
+  $('fill').style.width=percent.toFixed(2)+'%';
+  $('percent').textContent=percent.toFixed(1)+'%';
+  if(done>=max && max>=SIZES['index.pck']){
+    if(!$('phase').textContent.includes('Initializing')){
+      phase('Download complete. Initializing WebAssembly runtime...');
+      // 100% is the download stage, not proof that the game launched.
+      if(!failTimer)failTimer=setTimeout(()=>{
+        if(!launched){$('source').textContent='Godot is still starting. '+(lastGodotError||'The page has not yet reported successful startup.');}
+      },60000);
+    }
+  }
+}
+function reportError(error){
+  if(launched)return;
+  launching=false;
+  clearTimeout(failTimer);
+  const message=(error&&error.stack)||String(error);
+  phase('Unable to start the application');
+  $('error').textContent=message;
+  $('error').hidden=false;
+  $('retry').style.display='block';
+  console.error('[Runtime Lab]',error);
+  if(window.fetch!==originalFetch)window.fetch=originalFetch;
+}
+function makeBlobURL(code){return URL.createObjectURL(new Blob([code],{type:'text/javascript'}))}
+async function fetchGitHub(url, options){
+  const candidates=url.includes('github.com/')||url.includes('raw.githubusercontent.com/') ? [url,...RELAYS.map(prefix=>prefix+url)] : [url];
+  const errors=[];
+  for(const candidate of candidates){
+    try {
+      const response=await BASE_FETCH(candidate,{mode:'cors',credentials:'omit',...options});
+      if(!response.ok){errors.push(urlName(candidate)+': HTTP '+response.status);await response.body?.cancel();continue;}
+      const typ=(response.headers.get('content-type')||'').toLowerCase();
+      if(typ.includes('text/html')||typ.includes('application/json')){
+        errors.push(urlName(candidate)+': not a binary response');await response.body?.cancel();continue;
+      }
+      $('source').textContent='Downloading from '+urlName(candidate);
+      return response;
+    }catch(err){errors.push(urlName(candidate)+': '+String(err.message||err));}
+  }
+  throw Error('Unable to download the configured resource. '+errors.join('; '));
+}
+async function originalGlue(){
+  phase('Fetching configured Godot engine...');
+  const response=await fetchGitHub(GLUE_URL);
+  const script=await response.text();
+  if(script.length<300000||!script.includes('const Preloader')||!script.includes('const Engine')){
+    throw Error('The configured engine JavaScript is missing or incompatible.');
+  }
+  return script;
+}
+async function monitoredBinary(response,name){
+  // Validate streams before giving the game pack to the original V3 engine.
+  const expected=SIZES[name];
+  const announced=Number(response.headers.get('content-length'));
+  if(announced>0 && announced!==expected){await response.body?.cancel();throw Error(name+' has an unexpected Content-Length: '+announced+' instead of '+expected);}
+  if(!response.body)throw Error('Download response has no readable stream: '+name);
+  const reader=response.body.getReader();
+  let read=0,checked=false,firstBytes=[];
+  const stream=new ReadableStream({
+    async pull(controller){
+      try {
+        const {done,value}=await reader.read();
+        if(done){
+          if(read!==expected)throw Error(name+' incomplete: '+read+' of '+expected+' bytes');
+          controller.close();return;
+        }
+        read+=value.byteLength;
+        if(read>expected)throw Error(name+' download is larger than expected');
+        if(!checked){
+          for(let i=0;i<value.length && firstBytes.length<4;i++)firstBytes.push(value[i]);
+          if(firstBytes.length===4){
+            const signature=String.fromCharCode(...firstBytes);
+            if(name==='index.pck'&&signature!=='GDPC')throw Error('The configured PCK file has an invalid signature');
+            if(name==='index.wasm'&&firstBytes.join(',')!=='0,97,115,109')throw Error('The configured WASM file has an invalid signature');
+            checked=true;
+          }
+        }
+        controller.enqueue(value);
+      } catch(e){controller.error(e);try{await reader.cancel(e)}catch(_){} }
+    },
+    cancel(reason){return reader.cancel(reason)}
+  },{highWaterMark:1});
+  const headers=new Headers(response.headers);
+  // Streaming response, don't inherit an upstream Content-Encoding for decoded chunks.
+  headers.delete('content-encoding');
+  headers.delete('content-length');
+  headers.set('content-type',name.endsWith('.wasm')?'application/wasm':'application/octet-stream');
+  return new Response(stream,{status:200,headers});
+}
+function captureGodotErrors(){
+  window.addEventListener('error',e=>{
+    if(!launching||launched)return;
+    if(/WebAssembly|Worker|pthread|SharedArrayBuffer|abort|memory/i.test(e.message||'')){
+      lastGodotError=e.message||'Browser execution error';
+      reportError(new Error(lastGodotError));
+    }
+  });
+  window.addEventListener('unhandledrejection',e=>{
+    if(launching&&!launched){lastGodotError=String(e.reason);reportError(e.reason);}
+  });
+}
+async function boot(){
+  if(launching||launched)return;
+  launching=true;
+  $('error').hidden=true;
+  $('error').textContent='';
+  $('retry').style.display='none';
+  $('bytes').textContent=`0 / ${format(TOTAL)} bytes`;
+  $('fill').style.width='0%';$('percent').textContent='0.0%';
+  $('source').textContent='';
+  if(!projectConfigured()){
+    launching=false;
+    phase('Enter compatible project URLs to test this runtime.');
+    $('config').hidden=false;
+    return;
+  }
+  $('config').hidden=true;
+  phase('Preparing WebAssembly runtime...');
+  try {
+    if(window.runtimeIsolationReady) await window.runtimeIsolationReady;
+    if(!window.crossOriginIsolated||typeof SharedArrayBuffer==='undefined'){
+      throw Error('Shared memory is blocked in this browser context. Open this GitHub Pages link directly in a tab rather than inside W3Schools or an unisolated Framer iframe.');
+    }
+    if(typeof WebAssembly==='undefined')throw Error('WebAssembly is unavailable');
+    if(typeof Worker==='undefined')throw Error('Web Workers are unavailable');
+    const probe=document.createElement('canvas');
+    if(!probe.getContext('webgl2')&&!probe.getContext('webgl'))throw Error('WebGL is unavailable');
+    const script=await originalGlue();
+    glueBlobUrl=makeBlobURL(script);
+    workerBlobUrl=makeBlobURL(WORKER_CODE);
+    audioBlobUrl=makeBlobURL(AUDIO_CODE);
+    await new Promise((resolve,reject)=>{
+      const tag=document.createElement('script');tag.src=glueBlobUrl;
+      tag.onload=resolve;tag.onerror=()=>reject(Error('Unable to execute original Godot index.js'));
+      document.head.appendChild(tag);
+    });
+    if(typeof window.Engine!=='function')throw Error('The original Godot JavaScript did not expose Engine');
+    const engine=new window.Engine({
+      args:[],canvas:$('canvas'),canvasResizePolicy:2,executable:'index',
+      fileSizes:SIZES,focusCanvas:true,gdnativeLibs:[],experimentalVK:false,
+      persistentPaths:[],serviceWorker:'',
+      onPrint:(...x)=>console.info('[Godot]',...x),
+      onPrintError:(...x)=>{lastGodotError=x.join(' ');console.error('[Godot]',...x);}
+    });
+    // Restore only V3's worker+audio paths. No changes to Godot's WASM.
+    const getModuleConfig=engine.config.getModuleConfig;
+    engine.config.getModuleConfig=function(...args){
+      const moduleConfig=getModuleConfig.apply(this,args);
+      const locate=moduleConfig.locateFile;
+      moduleConfig.locateFile=(file)=> file.endsWith('.worker.js') ? workerBlobUrl :
+        file.endsWith('.audio.worklet.js') ? audioBlobUrl :
+        file.endsWith('.js') ? glueBlobUrl : locate(file);
+      moduleConfig.mainScriptUrlOrBlob=glueBlobUrl;
+      return moduleConfig;
+    };
+    originalFetch=window.fetch;
+    window.fetch=(request,opts)=>{
+      const address=(request instanceof Request ? request.url : String(request)).split(/[?#]/)[0];
+      const basename=address.substring(address.lastIndexOf('/')+1);
+      if(Object.prototype.hasOwnProperty.call(SIZES,basename)){
+        return fetchGitHub(DOWNLOAD_URLS[basename],opts).then(response=>monitoredBinary(response,basename));
+      }
+      return originalFetch.call(window,request,opts);
+    };
+    phase('Downloading configured project data...');
+    await engine.startGame({onProgress:(current,total)=>showProgress(current,total)});
+    launched=true;launching=false;
+    clearTimeout(failTimer);
+    window.fetch=originalFetch;
+    $('loader').hidden=true;
+    try{$('canvas').focus({preventScroll:true})}catch(_){}
+    console.info('[Runtime Lab] Runtime started');
+  }catch(error){reportError(error);}
+}
+$('retry').addEventListener('click',()=>location.reload());
+$('config').addEventListener('submit',event=>{
+  event.preventDefault();
+  const data=new FormData(event.currentTarget);
+  const url=new URL(location.href);
+  ['js','wasm','pck','wasmSize','pckSize','label'].forEach(key=>{
+    const value=String(data.get(key)||'').trim();
+    if(value) url.searchParams.set(key,value);
+    else url.searchParams.delete(key);
+  });
+  location.href=url.href;
+});
+captureGodotErrors();
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',boot,{once:true});else boot();
+})();
+</script>
+
+</body></html>
