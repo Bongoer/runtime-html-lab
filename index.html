@@ -2,7 +2,7 @@
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#000000">
-<title>Web Runtime Lab</title>
+<title>Web Runtime</title>
 <script src="./coi-serviceworker.js"></script>
 </head><body>
 <style>
@@ -27,34 +27,20 @@
   #runtime-source {font-size:11px;color:#888;margin-top:6px;overflow-wrap:anywhere}
   #runtime-retry {display:none;margin:20px auto 0;padding:10px 24px;border:0;background:#df9dbb;
     border-radius:4px;color:#141414;font:inherit;cursor:pointer;}
-  #runtime-config {text-align:left;max-height:48vh;overflow:auto;scrollbar-width:thin;margin:16px auto 0;max-width:460px}
-  #runtime-config[hidden] {display:none}
-  #runtime-config label {display:block;font-size:12px;color:#bbb;margin:10px 0}
-  #runtime-config input {display:block;width:100%;margin-top:5px;padding:10px 12px;background:#171717;color:white;border:1px solid #454545;border-radius:5px;font:inherit;font-size:13px}
-  #runtime-config button {display:block;width:100%;margin:15px 0 8px;padding:11px;color:#111;background:#df9dbb;border:0;border-radius:5px;font:inherit}
   @media (max-width:600px) {#runtime-title {font-size:23px} #runtime-game{min-height:260px}}
 </style>
 <div id="runtime-game">
   <canvas id="runtime-canvas" tabindex="0" aria-label="Web application"></canvas>
   <div id="runtime-loader" role="status" aria-live="polite">
     <div id="runtime-inner">
-      <div id="runtime-title">Web Runtime Lab</div>
-      <div id="runtime-phase">Configure a compatible project to begin.</div>
+      <div id="runtime-title">Loading…</div>
+      <div id="runtime-phase">Preparing WebAssembly runtime...</div>
       <div id="runtime-bytes">0 / 0 bytes</div>
       <div id="runtime-track"><div id="runtime-fill"></div></div>
       <div id="runtime-percent">0.0%</div>
       <div id="runtime-source"></div>
       <div id="runtime-error" hidden></div>
       <button id="runtime-retry" type="button">Retry</button>
-      <form id="runtime-config" hidden>
-        <label>Engine JavaScript URL<input name="js" type="url" required placeholder="https://example.org/export/index.js"></label>
-        <label>WebAssembly URL<input name="wasm" type="url" required placeholder="https://example.org/export/index.wasm"></label>
-        <label>WebAssembly file size (bytes)<input name="wasmSize" type="number" min="1" step="1" required></label>
-        <label>Project PCK URL<input name="pck" type="url" required placeholder="https://example.org/export/index.pck"></label>
-        <label>Project PCK size (bytes)<input name="pckSize" type="number" min="1" step="1" required></label>
-        <label>Display title<input name="label" placeholder="Web Runtime Lab" maxlength="80"></label>
-        <button type="submit">Launch configured project</button>
-      </form>
     </div>
   </div>
 </div>
@@ -82,14 +68,25 @@ if(visible.length===1&&visible[0]===ROOT){
   }
 }
 const $ = (name)=>document.getElementById('runtime-'+name);
+// The repository contains only the loader. External resources remain on their
+// original servers and are downloaded automatically. No game files are bundled.
 const QUERY=new URLSearchParams(location.search);
+const RELEASE='https://github.com/Bongoer/wasm-unknown/releases/download/v1/';
+const DEFAULTS={
+  js:'https://raw.githubusercontent.com/axk-coder/Cool-maths/master/public/truffled/games/kinitopet/index.js',
+  wasm:RELEASE+'index.wasm',
+  pck:RELEASE+'index.pck',
+  wasmSize:14065065,
+  pckSize:406815840,
+  label:'Loading…'
+};
 const CONFIG={
-  js:QUERY.get('js')||'',
-  wasm:QUERY.get('wasm')||'',
-  pck:QUERY.get('pck')||'',
-  wasmSize:Number(QUERY.get('wasmSize')||0),
-  pckSize:Number(QUERY.get('pckSize')||0),
-  label:QUERY.get('label')||'Web Runtime Lab'
+  js:QUERY.get('js')||DEFAULTS.js,
+  wasm:QUERY.get('wasm')||DEFAULTS.wasm,
+  pck:QUERY.get('pck')||DEFAULTS.pck,
+  wasmSize:Number(QUERY.get('wasmSize')||DEFAULTS.wasmSize),
+  pckSize:Number(QUERY.get('pckSize')||DEFAULTS.pckSize),
+  label:QUERY.get('label')||DEFAULTS.label
 };
 const SIZES=Object.freeze({'index.pck':CONFIG.pckSize,'index.wasm':CONFIG.wasmSize});
 const TOTAL=SIZES['index.pck']+SIZES['index.wasm'];
@@ -230,12 +227,9 @@ async function boot(){
   $('fill').style.width='0%';$('percent').textContent='0.0%';
   $('source').textContent='';
   if(!projectConfigured()){
-    launching=false;
-    phase('Enter compatible project URLs to test this runtime.');
-    $('config').hidden=false;
+    reportError(Error('The configured WebAssembly resource addresses are invalid.'));
     return;
   }
-  $('config').hidden=true;
   phase('Preparing WebAssembly runtime...');
   try {
     if(window.runtimeIsolationReady) await window.runtimeIsolationReady;
@@ -294,17 +288,6 @@ async function boot(){
   }catch(error){reportError(error);}
 }
 $('retry').addEventListener('click',()=>location.reload());
-$('config').addEventListener('submit',event=>{
-  event.preventDefault();
-  const data=new FormData(event.currentTarget);
-  const url=new URL(location.href);
-  ['js','wasm','pck','wasmSize','pckSize','label'].forEach(key=>{
-    const value=String(data.get(key)||'').trim();
-    if(value) url.searchParams.set(key,value);
-    else url.searchParams.delete(key);
-  });
-  location.href=url.href;
-});
 captureGodotErrors();
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',boot,{once:true});else boot();
 })();
